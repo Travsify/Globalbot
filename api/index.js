@@ -7,7 +7,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Config - environment variables (set in Vercel)
+// Config
 const WHAPI_TOKEN = process.env.WHAPI_TOKEN;
 const WHAPI_ENDPOINT = "https://gate.whapi.cloud";
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
@@ -23,23 +23,22 @@ function initDb() {
     db.exec(`
         CREATE TABLE IF NOT EXISTS conversations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            phone TEXT PRIMARY KEY,
+            phone TEXT UNIQUE,
             name TEXT,
             last_message TEXT,
             last_message_time TEXT,
-            state TEXT DEFAULT 'new',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            phone TEXT NOT NULL,
+            phone TEXT,
             message TEXT,
             direction TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS quote_requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            phone TEXT NOT NULL,
+            phone TEXT,
             origin TEXT,
             destination TEXT,
             weight TEXT,
@@ -79,7 +78,7 @@ RESPONSE STYLE:
 - Always end with a call-to-action`;
 
 // Helper functions
-async function sendWhasAppMessage(to, text) {
+async function sendWhatsAppMessage(to, text) {
     const response = await fetch(`${WHAPI_ENDPOINT}/messages/text`, {
         method: 'POST',
         headers: {
@@ -96,13 +95,11 @@ function saveMessage(phone, message, direction) {
 }
 
 function saveConversation(phone, name, lastMessage) {
+    // Use INSERT OR REPLACE which is more reliable
     db.prepare(`
-        INSERT INTO conversations (phone, name, last_message, last_message_time) 
+        INSERT OR REPLACE INTO conversations (phone, name, last_message, last_message_time)
         VALUES (?, ?, ?, datetime('now'))
-        ON CONFLICT(phone) DO UPDATE SET
-        last_message = excluded.last_message,
-        last_message_time = datetime('now')
-    `).run(phone, name, lastMessage);
+    `).run(phone, name || 'Customer', lastMessage);
 }
 
 function getConversationContext(phone, limit = 10) {
@@ -151,7 +148,10 @@ async function generateAIResponse(phone, userMessage) {
 }
 
 // Routes
-app.get('/webhook/whapi', (req, res) => res.json({ status: 'ok' }));
+app.get('/webhook/whapi', (req, res) => {
+    res.json({ status: 'ok' });
+});
+
 app.post('/webhook/whapi', async (req, res) => {
     const messages = req.body.messages || [];
     
@@ -166,15 +166,19 @@ app.post('/webhook/whapi', async (req, res) => {
         
         console.log(`📩 From ${phone}: ${text.substring(0, 100)}`);
         
-        saveMessage(phone, text, 'incoming');
-        saveConversation(phone, name, text);
-        
-        const response = await generateAIResponse(phone, text);
-        
-        saveMessage(phone, response, 'outgoing');
-        await sendWhasAppMessage(phone, response);
-        
-        console.log(`🤖 Response: ${response.substring(0, 100)}...`);
+        try {
+            saveMessage(phone, text, 'incoming');
+            saveConversation(phone, name, text);
+            
+            const response = await generateAIResponse(phone, text);
+            
+            saveMessage(phone, response, 'outgoing');
+            await sendWhatsAppMessage(phone, response);
+            
+            console.log(`🤖 Response: ${response.substring(0, 100)}...`);
+        } catch (error) {
+            console.error('Error processing message:', error);
+        }
     }
     
     res.json({ status: 'ok' });
@@ -231,7 +235,7 @@ Ready to ship? Reply YES to proceed!
 🚢 GlobalLine Logistics`;
     
     if (phone) {
-        await sendWhasAppMessage(phone, quoteText);
+        await sendWhatsAppMessage(phone, quoteText);
     }
     
     db.prepare(`
@@ -247,13 +251,13 @@ app.post('/api/send', async (req, res) => {
     if (!phone || !message) {
         return res.status(400).json({ error: 'phone and message required' });
     }
-    const result = await sendWhasAppMessage(phone, message);
+    const result = await sendWhatsAppMessage(phone, message);
     res.json(result);
 });
 
 app.post('/api/send-alert', async (req, res) => {
     const { message } = req.body;
-    const result = await sendWhasAppMessage(ADMIN_NUMBER, `🔔 ALERT:\n\n${message}`);
+    const result = await sendWhatsAppMessage(ADMIN_NUMBER, `🔔 ALERT:\n\n${message}`);
     res.json(result);
 });
 
