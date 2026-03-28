@@ -16,12 +16,12 @@ import sqlite3
 app = Flask(__name__)
 
 # Config
-WHAPI_TOKEN = "ut9iTWoHtpK1tPpPVmtQSytn3HcZtLNO"
+WHAPI_TOKEN = os.environ.get("WHAPI_TOKEN")
 WHAPI_ENDPOINT = "https://gate.whapi.cloud"
-GROQ_API_KEY = "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"
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
 ADMIN_NUMBER = "447490347577"
-DB_PATH = "/data/globalline-whatsapp/automation.db"
+DB_PATH = os.environ.get("DB_PATH", "/tmp/globalline.db")
 
 # System prompt for GlobalLine AI
 SYSTEM_PROMPT = """You are GlobalLine Logistics AI assistant on WhatsApp. You help customers with:

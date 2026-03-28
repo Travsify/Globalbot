@@ -21,8 +21,8 @@ AI-powered WhatsApp automation for GlobalLine Logistics. Powered by Groq (FREE, 
 
 ### 1. Get Your API Keys
 
-- **WHAPI Token:** Already have `ut9iTWoHtpK1tPpPVmtQSytn3HcZtLNO`
-- **Groq API Key:** `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`
+- **WHAPI Token:** Get from https://whapi.cloud
+- **Groq API Key:** Get from https://console.groq.com
 
 ### 2. Deploy
 

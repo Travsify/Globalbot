@@ -7,10 +7,10 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Config - use environment variables
-const WHAPI_TOKEN = process.env.WHAPI_TOKEN || "ut9iTWoHtpK1tPpPVmtQSytn3HcZtLNO";
+// Config - environment variables (set in Vercel)
+const WHAPI_TOKEN = process.env.WHAPI_TOKEN;
 const WHAPI_ENDPOINT = "https://gate.whapi.cloud";
-const GROQ_API_KEY = process.env.GROQ_API_KEY || "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";
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
 const ADMIN_NUMBER = process.env.ADMIN_NUMBER || "447490347577";
 
