@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  bot:
+    build: ./globalline-whatsapp
+    ports:
+      - "5001:5001"
+    environment:
+      - WHAPI_TOKEN=${WHAPI_TOKEN}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - globalline-data:/data
+    restart: unless-stopped
+
+  worker:
+    build: ./globalline-whatsapp
+    command: python worker.py
+    environment:
+      - WHAPI_TOKEN=${WHAPI_TOKEN}
+    volumes:
+      - globalline-data:/data
+    restart: unless-stopped
+
+volumes:
+  globalline-data:

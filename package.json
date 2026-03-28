@@ -1,0 +1,14 @@
+{
+  "name": "globalline-whatsapp",
+  "version": "1.0.0",
+  "description": "GlobalLine WhatsApp AI Bot",
+  "main": "api/index.js",
+  "scripts": {
+    "start": "node api/index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "better-sqlite3": "^9.4.3",
+    "express": "^4.18.2"
+  }
+}

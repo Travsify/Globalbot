@@ -1,0 +1,32 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "api/index.js",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/webhook/whapi",
+      "dest": "/api/index.js"
+    },
+    {
+      "src": "/webhook/status",
+      "dest": "/api/index.js"
+    },
+    {
+      "src": "/api/(.*)",
+      "dest": "/api/index.js"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/api/index.js"
+    }
+  ],
+  "env": {
+    "WHAPI_TOKEN": "@whapi_token",
+    "GROQ_API_KEY": "@groq_api_key",
+    "ADMIN_NUMBER": "@admin_number"
+  }
+}
