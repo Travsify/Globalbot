@@ -151,6 +151,7 @@ async function generateAIResponse(phone, userMessage) {
 }
 
 // Routes
+app.get('/webhook/whapi', (req, res) => res.json({ status: 'ok' }));
 app.post('/webhook/whapi', async (req, res) => {
     const messages = req.body.messages || [];
     
