@@ -23,7 +23,7 @@ function initDb() {
     db.exec(`
         CREATE TABLE IF NOT EXISTS conversations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            phone TEXT NOT NULL UNIQUE,
+            phone TEXT PRIMARY KEY,
             name TEXT,
             last_message TEXT,
             last_message_time TEXT,
