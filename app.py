@@ -235,9 +235,13 @@ def save_quote_request(phone, message):
 # WEBHOOKS
 # ==========================================
 
-@app.route("/webhook/whapi", methods=["POST"])
+@app.route("/webhook/whapi", methods=["GET", "POST"])
 def webhook_whapi():
-    data = request.json
+    # WHAPI sends GET for webhook verification
+    if request.method == "GET":
+        return jsonify({"status": "ok"})
+    
+    data = request.json or {}
     
     messages = data.get("messages", [])
     if not messages:
