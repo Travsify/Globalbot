@@ -20,6 +20,7 @@ WHAPI_TOKEN = os.environ.get("WHAPI_TOKEN")
 WHAPI_ENDPOINT = "https://gate.whapi.cloud"
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
+PAYSTACK_SECRET_KEY = os.environ.get("PAYSTACK_SECRET_KEY")
 ADMIN_NUMBER = "447490347577"
 DB_PATH = os.environ.get("DB_PATH", "/tmp/globalline.db")
 
@@ -114,6 +115,26 @@ def init_db():
             status TEXT DEFAULT 'pending',
             origin TEXT,
             destination TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS bookings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            phone TEXT NOT NULL,
+            receiver_name TEXT,
+            receiver_phone TEXT,
+            receiver_address TEXT,
+            cargo_description TEXT,
+            weight TEXT,
+            service_type TEXT,
+            origin TEXT,
+            destination TEXT,
+            estimated_price TEXT,
+            paystack_ref TEXT,
+            payment_status TEXT DEFAULT 'pending',
+            status TEXT DEFAULT 'pending',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -294,12 +315,21 @@ def generate_ai_response(phone, user_message):
         result = cancel_quote_flow(phone)
         if result:
             return result
+        result = cancel_booking_flow(phone)
+        if result:
+            return result
     
     # Check if in quote flow FIRST - before main menu
     quote_response = handle_quote_flow(phone, text)
     if quote_response:
         print(f"  >>> PATH: quote_flow")
         return quote_response
+    
+    # Check if in booking flow
+    booking_response = handle_booking_flow(phone, text)
+    if booking_response:
+        print(f"  >>> PATH: booking_flow")
+        return booking_response
     
     # Check for tracking intent
     tracking_response = auto_track_shipment(phone, text)
@@ -312,18 +342,23 @@ def generate_ai_response(phone, user_message):
     if any(kw in text_lower for kw in quote_keywords):
         return start_quote_flow(phone)
     
+    # Check for booking keywords
+    booking_keywords = ["book", "book shipment", "send package", "ship cargo"]
+    if text_lower in booking_keywords:
+        return start_booking_flow(phone)
+    
+    # Check for status command
+    if text_lower == "status":
+        status_response = check_booking_status_message(phone)
+        if status_response:
+            print(f"  >>> PATH: status_check")
+            return status_response
+    
     # Check main menu / navigation LAST (only for explicit menu commands)
     menu_response = get_main_menu_response(text_lower, phone)
     if menu_response:
         print(f"  >>> PATH: main_menu")
         return menu_response
-    
-    # Check for booking
-    if text_lower == "book" or "confirm booking" in text_lower:
-        return ("🙏 Booking request received!\n\n"
-                "Our team will contact you shortly to finalize your shipment.\n"
-                "📧 Or email us: info@globalline.io\n"
-                "📱 Call us: +44 7490 347577")
     
     # Fall back to AI chat
     context = get_conversation_context(phone, limit=10)
@@ -552,6 +587,318 @@ def cancel_quote_flow(phone):
     return MAIN_MENU
 
 # ==========================================
+# PAYSTACK PAYMENT LINK
+# ==========================================
+
+def create_paystack_payment_link(amount_kobo, email, phone, description, ref):
+    """Create a Paystack payment link"""
+    if not PAYSTACK_SECRET_KEY:
+        return None
+    
+    url = "https://api.paystack.co/transaction/link"
+    headers = {
+        "Authorization": f"Bearer {PAYSTACK_SECRET_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "amount": amount_kobo,
+        "email": email or f"{phone}@globalline.io",
+        "currency": "NGN",
+        "reference": ref,
+        "description": description,
+        "customer_phone": phone,
+        "metadata": {
+            "phone": phone,
+            "custom_fields": [
+                {"variable_name": "customer_phone", "value": phone}
+            ]
+        }
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=15)
+        result = response.json()
+        if result.get("status"):
+            return result["data"]["link"]
+        else:
+            print(f"Paystack error: {result}")
+            return None
+    except Exception as e:
+        print(f"Paystack exception: {e}")
+        return None
+
+# ==========================================
+# BOOKING FLOW
+# ==========================================
+
+BOOKING_QUESTIONS = {
+    "receiver_name": "📦 Let's book your shipment!\n\nWhat is the receiver's full name?",
+    "receiver_phone": "✅ Got it!\n\nWhat is the receiver's phone number?",
+    "receiver_address": "📱 Great!\n\nWhat is the receiver's full address?\n(city, country, street)",
+    "cargo_description": "📍 Perfect!\n\nWhat are you shipping?\n(brief description of cargo)",
+    "weight": "📝 What is the estimated weight?\n\n(in kg, e.g. 10kg, 25kg)",
+    "service_type": """⚖️ How would you like it shipped?
+
+1️⃣ Air Freight (1-3 days) - NGN 4,000-6,500/kg
+2️⃣ Ocean Freight (15-45 days) - NGN 380-3,000/kg
+3️⃣ Road Freight (1-7 days)
+
+Just reply with 1, 2, or 3:""",
+}
+
+SERVICE_PRICES = {
+    "1": ("Air Freight", 4500),   # NGN per kg
+    "2": ("Ocean Freight", 700),
+    "3": ("Road Freight", 1500),
+}
+
+def start_booking_flow(phone):
+    """Start a new booking - insert empty row"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO bookings (phone, status) VALUES (?, 'collecting')
+    """, (phone,))
+    conn.commit()
+    conn.close()
+    return BOOKING_QUESTIONS["receiver_name"]
+
+def get_current_booking(phone):
+    """Get the active collecting booking for this phone"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute("""
+        SELECT * FROM bookings 
+        WHERE phone = ? AND status = 'collecting' AND payment_status = 'pending'
+        ORDER BY id DESC LIMIT 1
+    """, (phone,))
+    booking = c.fetchone()
+    conn.close()
+    return dict(booking) if booking else None
+
+def handle_booking_flow(phone, text):
+    """Process booking flow step by step"""
+    print(f"\n--- BOOKING FLOW ---")
+    print(f"  phone: {phone}, text: {text}")
+    
+    booking = get_current_booking(phone)
+    
+    if not booking:
+        print("  No active booking")
+        return None  # Not in booking flow
+    
+    # Determine which field to fill next
+    if booking['receiver_name'] is None:
+        print("  >>> FILL: receiver_name")
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("UPDATE bookings SET receiver_name = ? WHERE id = ?", (text.strip(), booking['id']))
+        conn.commit()
+        conn.close()
+        return BOOKING_QUESTIONS["receiver_phone"]
+    
+    elif booking['receiver_phone'] is None:
+        print("  >>> FILL: receiver_phone")
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("UPDATE bookings SET receiver_phone = ? WHERE id = ?", (text.strip(), booking['id']))
+        conn.commit()
+        conn.close()
+        return BOOKING_QUESTIONS["receiver_address"]
+    
+    elif booking['receiver_address'] is None:
+        print("  >>> FILL: receiver_address")
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("UPDATE bookings SET receiver_address = ? WHERE id = ?", (text.strip(), booking['id']))
+        conn.commit()
+        conn.close()
+        return BOOKING_QUESTIONS["cargo_description"]
+    
+    elif booking['cargo_description'] is None:
+        print("  >>> FILL: cargo_description")
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("UPDATE bookings SET cargo_description = ? WHERE id = ?", (text.strip(), booking['id']))
+        conn.commit()
+        conn.close()
+        return BOOKING_QUESTIONS["weight"]
+    
+    elif booking['weight'] is None:
+        print("  >>> FILL: weight")
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("UPDATE bookings SET weight = ? WHERE id = ?", (text.strip(), booking['id']))
+        conn.commit()
+        conn.close()
+        return BOOKING_QUESTIONS["service_type"]
+    
+    elif booking['service_type'] is None:
+        print("  >>> FILL: service_type")
+        service_key = text.strip()
+        service_info = SERVICE_PRICES.get(service_key)
+        
+        if not service_info:
+            return ("I didn't understand that. Please reply with 1, 2, or 3:\n\n" + 
+                   BOOKING_QUESTIONS["service_type"])
+        
+        service_name, price_per_kg = service_info
+        
+        # Get weight as number
+        try:
+            weight_kg = float(''.join(filter(lambda x: x.isdigit() or x=='.', text)))
+        except:
+            weight_kg = 10  # default
+        
+        # Calculate total (weight * price per kg in kobo)
+        total_kobo = int(weight_kg * price_per_kg * 100)
+        estimated_price = f"₦{int(weight_kg * price_per_kg):,}"
+        
+        # Generate reference
+        import uuid
+        ref = f"GL{int(uuid.uuid4().int)[:10]}"
+        
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("""
+            UPDATE bookings SET service_type = ?, estimated_price = ?, paystack_ref = ? WHERE id = ?
+        """, (service_name, estimated_price, ref, booking['id']))
+        conn.commit()
+        conn.close()
+        
+        # Create Paystack payment link
+        description = f"Shipping: {booking.get('cargo_description', 'Cargo')} - {weight_kg}kg {service_name}"
+        payment_link = create_paystack_payment_link(
+            total_kobo, 
+            None,  # email - optional
+            phone, 
+            description, 
+            ref
+        )
+        
+        # Send payment message with button
+        price_display = estimated_price
+        msg = (f"💰 Booking Summary:\n\n"
+               f"📍 From: {booking.get('origin', 'Nigeria')}\n"
+               f"📍 To: {booking.get('receiver_address', 'N/A')}\n"
+               f"📦 {booking.get('cargo_description', 'Cargo')} - {booking.get('weight', weight_kg)}\n"
+               f"🚢 {service_name}\n"
+               f"💰 Total: {price_display}\n\n"
+               f"Click below to pay:")
+        
+        if payment_link:
+            # Send as message with inline button
+            send_whatsapp_button(phone, msg, payment_link)
+        else:
+            # Fallback without button
+            send_whatsapp_message(phone, msg + f"\n\n🔗 Pay here: https://paystack.com/pay/REF")
+        
+        # Mark as awaiting payment
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("UPDATE bookings SET status = 'awaiting_payment' WHERE id = ?", (booking['id'],))
+        conn.commit()
+        conn.close()
+        
+        return ("✅ Your payment link has been sent!\n\n"
+                "Complete payment and your tracking number will be activated.\n"
+                "Reply 'STATUS' to check your booking.")
+    
+    elif booking['service_type'] is not None and booking['paystack_ref'] is not None:
+        # Already selected service, waiting for payment
+        return ("⏳ Payment pending.\n\n"
+                "Once you complete payment, reply 'STATUS' to confirm.\n"
+                "Or click your payment link again.")
+    
+    else:
+        print("  >>> Booking flow complete (unexpected state)")
+        return MAIN_MENU
+
+def send_whatsapp_button(to, text, url):
+    """Send WhatsApp message with inline button"""
+    button_payload = {
+        "to": to,
+        "text": text,
+        "buttons": [
+            {"title": "💳 Pay Now", "url": url}
+        ]
+    }
+    
+    url = f"{WHAPI_ENDPOINT}/messages/text"
+    headers = {
+        "Authorization": f"Bearer {WHAPI_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=button_payload, timeout=10)
+        return response.json()
+    except Exception as e:
+        print(f"Error sending button message: {e}")
+        return {"error": str(e)}
+
+def cancel_booking_flow(phone):
+    """Cancel the current booking"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM bookings WHERE phone = ? AND status = 'collecting'", (phone,))
+    conn.commit()
+    conn.close()
+    return MAIN_MENU
+
+def check_booking_status_message(phone):
+    """Check and report booking status for this phone"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    
+    # Check most recent booking
+    c.execute("""
+        SELECT * FROM bookings WHERE phone = ?
+        ORDER BY id DESC LIMIT 1
+    """, (phone,))
+    booking = c.fetchone()
+    conn.close()
+    
+    if not booking:
+        return None  # No booking found
+    
+    booking = dict(booking)
+    
+    # Check if there's a shipment with tracking
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute("SELECT * FROM shipments WHERE phone = ? ORDER BY id DESC LIMIT 1", (phone,))
+    shipment = c.fetchone()
+    conn.close()
+    
+    if booking['status'] == 'confirmed' and shipment:
+        return (f"📦 Booking Confirmed!\n\n"
+               f"🔢 Tracking: {dict(shipment)['tracking_number']}\n"
+               f"📊 Status: {dict(shipment)['status']}\n"
+               f"🚢 {booking['service_type']}\n"
+               f"📍 To: {booking['receiver_address']}\n\n"
+               f"We'll keep you updated! 🚢")
+    
+    elif booking['status'] == 'awaiting_payment' or booking['payment_status'] == 'pending':
+        msg = (f"⏳ Payment Pending\n\n"
+              f"📦 {booking['cargo_description']} - {booking['weight']}\n"
+              f"🚢 {booking['service_type']}\n"
+              f"💰 Total: {booking['estimated_price']}\n\n"
+              f"Click to pay: https://paystack.com/pay/{booking['paystack_ref']}\n\n"
+              f"After payment, reply STATUS to get your tracking number.")
+        return msg
+    
+    elif booking['payment_status'] == 'paid':
+        return (f"✅ Payment Received!\n\n"
+               f"Your tracking number will be sent shortly.\n"
+               f"We'll notify you when it's ready.")
+    
+    return None
+
+# ==========================================
 # WEBHOOKS
 # ==========================================
 
@@ -623,6 +970,108 @@ def webhook_whapi():
 @app.route("/webhook/status", methods=["POST"])
 def webhook_status():
     return jsonify({"status": "ok"})
+
+@app.route("/webhook/paystack", methods=["POST"])
+def webhook_paystack():
+    """Handle Paystack payment confirmation"""
+    data = request.json or {}
+    event = data.get("event")
+    
+    print(f"\n=== PAYSTACK WEBHOOK ===")
+    print(f"Event: {event}")
+    print(f"Data: {json.dumps(data.get('data', {}), indent=2)}")
+    
+    if event == "transaction.success":
+        tx_data = data.get("data", {})
+        ref = tx_data.get("reference")
+        status = tx_data.get("status")
+        
+        if ref and status == "success":
+            # Find booking by paystack_ref
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+            c.execute("SELECT * FROM bookings WHERE paystack_ref = ?", (ref,))
+            booking = c.fetchone()
+            conn.close()
+            
+            if booking:
+                # Generate tracking number
+                import uuid
+                tracking = "GL" + str(uuid.uuid4().int)[:10]
+                
+                # Update booking
+                conn = sqlite3.connect(DB_PATH)
+                c = conn.cursor()
+                c.execute("""
+                    UPDATE bookings SET 
+                        payment_status = 'paid',
+                        status = 'confirmed'
+                    WHERE paystack_ref = ?
+                """, (ref,))
+                conn.commit()
+                
+                # Create shipment record
+                c.execute("""
+                    INSERT INTO shipments (tracking_number, phone, origin, destination, status)
+                    VALUES (?, ?, ?, ?, 'Order Confirmed')
+                """, (tracking, booking['phone'], 
+                      booking.get('origin', 'Nigeria'),
+                      booking.get('receiver_address', 'N/A')))
+                conn.commit()
+                conn.close()
+                
+                # Notify customer
+                msg = (f"✅ PAYMENT CONFIRMED!\n\n"
+                       f"🔢 Your Tracking Number: {tracking}\n\n"
+                       f"📦 {booking['cargo_description']} - {booking['weight']}\n"
+                       f"🚢 {booking['service_type']}\n"
+                       f"📍 To: {booking['receiver_address']}\n\n"
+                       f"We'll notify you at every step of your shipment's journey!\n"
+                       f"🚢 GlobalLine Logistics")
+                
+                send_whatsapp_message(booking['phone'], msg)
+                
+                # Notify admin
+                send_whatsapp_message(ADMIN_NUMBER,
+                    f"🔔 BOOKING PAID!\n\n"
+                    f"Ref: {ref}\n"
+                    f"Tracking: {tracking}\n"
+                    f"Customer: {booking['phone']}\n"
+                    f"{booking['cargo_description']} - {booking['weight']}\n"
+                    f"Service: {booking['service_type']}")
+                
+                print(f"=== Payment confirmed for {ref}, tracking: {tracking} ===")
+    
+    return jsonify({"status": "ok"})
+
+@app.route("/api/booking-status", methods=["GET"])
+def check_booking_status():
+    """Check booking status by phone"""
+    phone = request.args.get("phone")
+    if not phone:
+        return jsonify({"error": "phone required"})
+    
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute("""
+        SELECT * FROM bookings WHERE phone = ? 
+        ORDER BY id DESC LIMIT 1
+    """, (phone,))
+    booking = c.fetchone()
+    conn.close()
+    
+    if not booking:
+        return jsonify({"status": "not_found"})
+    
+    return jsonify({
+        "status": dict(booking)['status'],
+        "payment_status": dict(booking)['payment_status'],
+        "paystack_ref": dict(booking)['paystack_ref'],
+        "service": dict(booking)['service_type'],
+        "price": dict(booking)['estimated_price']
+    })
 
 # ==========================================
 # API ROUTES
