@@ -118,6 +118,13 @@ def init_db():
         )
     """)
     
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS processed_messages (
+            msg_id TEXT PRIMARY KEY,
+            processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
     conn.commit()
     conn.close()
 
@@ -126,6 +133,27 @@ def save_message(phone, message, direction):
     c = conn.cursor()
     c.execute("INSERT INTO messages (phone, message, direction) VALUES (?, ?, ?)",
               (phone, message, direction))
+    conn.commit()
+    conn.close()
+
+def is_message_processed(msg_id):
+    """Check if message was already processed (deduplication)"""
+    if not msg_id:
+        return False
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM processed_messages WHERE msg_id = ?", (msg_id,))
+    exists = c.fetchone() is not None
+    conn.close()
+    return exists
+
+def mark_message_processed(msg_id):
+    """Mark a message as processed"""
+    if not msg_id:
+        return
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO processed_messages (msg_id) VALUES (?)", (msg_id,))
     conn.commit()
     conn.close()
 
@@ -146,12 +174,14 @@ def get_conversation_context(phone, limit=10):
 def save_conversation(phone, name=None, last_message=None):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    # Use raw SQL to preserve quote_state on update
     c.execute("""
         INSERT INTO conversations (phone, name, last_message, last_message_time) 
         VALUES (?, ?, ?, ?)
         ON CONFLICT(phone) DO UPDATE SET
-        last_message = excluded.last_message,
-        last_message_time = excluded.last_message_time
+            name = COALESCE(excluded.name, name),
+            last_message = excluded.last_message,
+            last_message_time = excluded.last_message_time
     """, (phone, name, last_message, datetime.now().isoformat()))
     conn.commit()
     conn.close()
@@ -294,9 +324,17 @@ def generate_ai_response(phone, user_message):
         
     except Exception as e:
         print(f"Groq Error: {e}")
-        return """Thanks for your message! Our team will get back to you shortly. 
+        return """🏢 GlobalLine Logistics
 
-For immediate help: info@globalline.io or call us 🚢"""
+I'm here to help! Here's what I can do:
+
+1️⃣ 📦 Book a Shipment
+2️⃣ 💰 Get a Quote
+3️⃣ 📍 Track Shipment
+4️⃣ 📋 List Services
+5️⃣ 💬 Talk to Support
+
+Just reply with a number or your question! 🚢"""
 
 def save_quote_request(phone, message):
     conn = sqlite3.connect(DB_PATH)
@@ -374,9 +412,13 @@ SERVICE_MAP = {
 }
 
 def start_quote_flow(phone):
+    # Ensure conversation row exists first
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("UPDATE conversations SET quote_state = 'awaiting_origin' WHERE phone = ?", (phone,))
+    c.execute("""
+        INSERT INTO conversations (phone, quote_state) VALUES (?, 'awaiting_origin')
+        ON CONFLICT(phone) DO UPDATE SET quote_state = 'awaiting_origin'
+    """, (phone,))
     conn.commit()
     conn.close()
     return QUOTE_QUESTIONS["awaiting_origin"]
@@ -384,8 +426,14 @@ def start_quote_flow(phone):
 def handle_quote_flow(phone, text):
     """Process each step of the quote flow"""
     conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
     c = conn.cursor()
+    # Ensure row exists
+    c.execute("""
+        INSERT INTO conversations (phone, quote_state) VALUES (?, 'none')
+        ON CONFLICT(phone) DO NOTHING
+    """, (phone,))
+    conn.commit()
+    conn.row_factory = sqlite3.Row
     c.execute("SELECT quote_state FROM conversations WHERE phone = ?", (phone,))
     row = c.fetchone()
     conn.close()
@@ -489,6 +537,12 @@ def webhook_whapi():
     for message in messages:
         if message.get("from_me"):
             continue
+        
+        # Deduplication - skip if already processed
+        msg_id = message.get("id")
+        if is_message_processed(msg_id):
+            continue
+        mark_message_processed(msg_id)
         
         phone = message.get("from")
         text = message.get("text", {}).get("body", "")
