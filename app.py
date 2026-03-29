@@ -280,6 +280,15 @@ def webhook_status():
 # API ROUTES
 # ==========================================
 
+@app.route("/api/reset-db", methods=["GET"])
+def reset_db():
+    """Reset database - for fixing schema issues"""
+    import os
+    if os.path.exists(DB_PATH):
+        os.remove(DB_PATH)
+    init_db()
+    return jsonify({"status": "ok", "message": "Database reset"})
+
 @app.route("/api/health", methods=["GET"])
 def health():
     return jsonify({
