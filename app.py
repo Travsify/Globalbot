@@ -445,94 +445,76 @@ SERVICE_MAP = {
 }
 
 def start_quote_flow(phone):
-    # Ensure conversation row exists first
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""
-        INSERT INTO conversations (phone, quote_state) VALUES (?, 'awaiting_origin')
-        ON CONFLICT(phone) DO UPDATE SET quote_state = 'awaiting_origin'
-    """, (phone,))
-    conn.commit()
-    conn.close()
+    # Just return the first question - handle_quote_flow will INSERT the quote_request
     return QUOTE_QUESTIONS["awaiting_origin"]
-
 def handle_quote_flow(phone, text):
-    """Process each step of the quote flow"""
+    """Process each step of the quote flow - uses quote_requests table only"""
     print(f"\n--- QUOTE FLOW ---")
     print(f"  phone: {phone}, text: {text}")
     
     conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row  # Set BEFORE queries
+    conn.row_factory = sqlite3.Row
     c = conn.cursor()
     
-    # Ensure row exists
+    # Get the PENDING quote request for this phone (if any)
     c.execute("""
-        INSERT INTO conversations (phone, quote_state) VALUES (?, 'none')
-        ON CONFLICT(phone) DO NOTHING
+        SELECT * FROM quote_requests 
+        WHERE phone = ? AND status = 'pending'
+        ORDER BY id DESC LIMIT 1
     """, (phone,))
-    conn.commit()
-    
-    c.execute("SELECT quote_state FROM conversations WHERE phone = ?", (phone,))
-    row = c.fetchone()
+    quote = c.fetchone()
     conn.close()
     
-    if not row:
-        print(f"  state: NO ROW")
-        return None
+    print(f"  quote row: {dict(quote) if quote else 'None'}")
     
-    # Handle both tuple and Row types
-    if isinstance(row, sqlite3.Row):
-        state = row["quote_state"]
-    else:
-        state = row[0]  # tuple index
-    
-    print(f"  state: {state}")
-    
-    if state == "none":
-        print(f"  >>> returning None (not in quote flow)")
-        return None
-    
-    if state == "awaiting_origin":
+    # Determine next step based on which fields are filled
+    if not quote:
+        # No pending quote - this is the FIRST step (origin)
+        print(f"  >>> STEP: origin (new quote)")
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        c.execute("UPDATE quote_requests SET origin = ? WHERE phone = ? AND status = 'pending'", (text.strip(), phone))
-        if c.rowcount == 0:
-            c.execute("INSERT INTO quote_requests (phone, origin, status) VALUES (?, ?, 'pending')", (phone, text.strip()))
-        c.execute("UPDATE conversations SET quote_state = 'awaiting_destination' WHERE phone = ?", (phone,))
+        c.execute("INSERT INTO quote_requests (phone, origin, status) VALUES (?, ?, 'pending')",
+            (phone, text.strip()))
         conn.commit()
         conn.close()
-        response = QUOTE_QUESTIONS["awaiting_destination"]
+        return QUOTE_QUESTIONS["awaiting_destination"]
     
-    elif state == "awaiting_destination":
+    elif quote['destination'] is None:
+        print(f"  >>> STEP: destination")
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        c.execute("UPDATE quote_requests SET destination = ? WHERE phone = ? AND status = 'pending'", (text.strip(), phone))
-        c.execute("UPDATE conversations SET quote_state = 'awaiting_weight' WHERE phone = ?", (phone,))
+        c.execute("UPDATE quote_requests SET destination = ? WHERE phone = ? AND status = 'pending' AND destination IS NULL",
+            (text.strip(), phone))
         conn.commit()
         conn.close()
-        response = QUOTE_QUESTIONS["awaiting_weight"]
+        return QUOTE_QUESTIONS["awaiting_weight"]
     
-    elif state == "awaiting_weight":
+    elif quote['weight'] is None:
+        print(f"  >>> STEP: weight")
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        c.execute("UPDATE quote_requests SET weight = ? WHERE phone = ? AND status = 'pending'", (text.strip(), phone))
-        c.execute("UPDATE conversations SET quote_state = 'awaiting_service' WHERE phone = ?", (phone,))
+        c.execute("UPDATE quote_requests SET weight = ? WHERE phone = ? AND status = 'pending' AND weight IS NULL",
+            (text.strip(), phone))
         conn.commit()
         conn.close()
-        response = QUOTE_QUESTIONS["awaiting_service"]
+        return QUOTE_QUESTIONS["awaiting_service"]
     
-    elif state == "awaiting_service":
+    elif quote['service_type'] is None:
+        print(f"  >>> STEP: service")
         service_key = text.strip().lower()
-        service_name, price_range = SERVICE_MAP.get(service_key, ("Unknown", "Contact us"))
+        service_name, price_range = SERVICE_MAP.get(service_key, (None, None))
+        
+        if not service_name:
+            return ("I didn't understand that. Please reply with 1, 2 or 3:\n\n" + 
+                   QUOTE_QUESTIONS["awaiting_service"])
         
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        c.execute("UPDATE quote_requests SET service_type = ?, status = 'quoted' WHERE phone = ? AND status = 'pending'", (service_name, phone))
-        c.execute("UPDATE conversations SET quote_state = 'none' WHERE phone = ?", (phone,))
+        c.execute("UPDATE quote_requests SET service_type = ?, status = 'quoted' WHERE phone = ? AND status = 'pending' AND service_type IS NULL",
+            (service_name, phone))
         conn.commit()
         conn.close()
         
-        # Get full quote details
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         c = conn.cursor()
@@ -540,22 +522,25 @@ def handle_quote_flow(phone, text):
         quote = c.fetchone()
         conn.close()
         
-        if quote:
-            response = (f"📦 Quote Ready!\n\n"
-                       f"📍 From: {quote['origin']}\n"
-                       f"📍 To: {quote['destination']}\n"
-                       f"⚖️ Weight: {quote['weight']}\n"
-                       f"🚢 Service: {service_name}\n"
-                       f"💰 Est. Rate: {price_range}\n\n"
-                       f"To proceed, contact us:\n"
-                       f"📧 info@globalline.io\n"
-                       f"📱 WhatsApp: Reply 'BOOK' to confirm booking")
-            
-            # Alert admin
-            send_whatsapp_message(ADMIN_NUMBER,
-                f"🔔 Quote Generated!\n\nFrom: {phone}\n{quote['origin']} → {quote['destination']}\n{quote['weight']}\n{service_name}")
+        response = (f"📦 Quote Ready!\n\n"
+                   f"📍 From: {quote['origin']}\n"
+                   f"📍 To: {quote['destination']}\n"
+                   f"⚖️ Weight: {quote['weight']}\n"
+                   f"🚢 Service: {service_name}\n"
+                   f"💰 Est. Rate: {price_range}\n\n"
+                   f"To proceed, contact us:\n"
+                   f"📧 info@globalline.io\n"
+                   f"📱 Reply 'BOOK' to confirm booking")
+        
+        send_whatsapp_message(ADMIN_NUMBER,
+            f"🔔 Quote Generated!\n\nFrom: {phone}\n{quote['origin']} → {quote['destination']}\n{quote['weight']}\n{service_name}")
+        
+        return response
     
-    return response
+    else:
+        print(f"  >>> quote complete, returning None")
+        return None
+
 
 def cancel_quote_flow(phone):
     conn = sqlite3.connect(DB_PATH)
@@ -651,6 +636,33 @@ def reset_db():
         os.remove(DB_PATH)
     init_db()
     return jsonify({"status": "ok", "message": "Database reset"})
+
+@app.route("/api/debug-db", methods=["GET"])
+def debug_db():
+    """Debug: show all DB state"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    
+    # Conversations
+    c.execute("SELECT * FROM conversations")
+    convs = [dict(r) for r in c.fetchall()]
+    
+    # Quote requests
+    c.execute("SELECT * FROM quote_requests ORDER BY id DESC LIMIT 20")
+    quotes = [dict(r) for r in c.fetchall()]
+    
+    # Processed messages
+    c.execute("SELECT * FROM processed_messages ORDER BY processed_at DESC LIMIT 20")
+    processed = [dict(r) for r in c.fetchall()]
+    
+    conn.close()
+    
+    return jsonify({
+        "conversations": convs,
+        "quote_requests": quotes,
+        "processed_messages": processed
+    })
 
 @app.route("/api/health", methods=["GET"])
 def health():
