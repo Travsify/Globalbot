@@ -259,8 +259,13 @@ def generate_ai_response(phone, user_message):
     text = user_message.strip()
     text_lower = text.lower()
     
+    print(f"\n--- GENERATE RESPONSE ---")
+    print(f"  phone: {phone}")
+    print(f"  text: {text}")
+    
     # Cancel commands
     if text_lower in ["cancel", "stop", "exit", "nevermind", "forget it"]:
+        print(f"  >>> PATH: cancel")
         result = cancel_quote_flow(phone)
         if result:
             return result
@@ -268,16 +273,19 @@ def generate_ai_response(phone, user_message):
     # Check main menu / navigation first
     menu_response = get_main_menu_response(text_lower, phone)
     if menu_response:
+        print(f"  >>> PATH: main_menu")
         return menu_response
     
     # Check if in quote flow
     quote_response = handle_quote_flow(phone, text)
     if quote_response:
+        print(f"  >>> PATH: quote_flow")
         return quote_response
     
     # Check for tracking intent
     tracking_response = auto_track_shipment(phone, text)
     if tracking_response:
+        print(f"  >>> PATH: tracking")
         return tracking_response
     
     # Check for new quote request keywords
@@ -425,6 +433,9 @@ def start_quote_flow(phone):
 
 def handle_quote_flow(phone, text):
     """Process each step of the quote flow"""
+    print(f"\n--- QUOTE FLOW ---")
+    print(f"  phone: {phone}, text: {text}")
+    
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     # Ensure row exists
@@ -438,11 +449,16 @@ def handle_quote_flow(phone, text):
     row = c.fetchone()
     conn.close()
     
-    if not row or row["quote_state"] == "none":
+    if not row:
+        print(f"  state: NO ROW")
         return None
     
     state = row["quote_state"]
-    response = None
+    print(f"  state: {state}")
+    
+    if state == "none":
+        print(f"  >>> returning None (not in quote flow)")
+        return None
     
     if state == "awaiting_origin":
         conn = sqlite3.connect(DB_PATH)
@@ -530,39 +546,59 @@ def webhook_whapi():
     
     data = request.json or {}
     
+    print(f"\n=== WEBHOOK RECEIVED ===")
+    print(f"Full payload: {json.dumps(data, indent=2)[:500]}")
+    
     messages = data.get("messages", [])
     if not messages:
+        print("No messages in payload")
         return jsonify({"status": "ok"})
     
+    print(f"Message count: {len(messages)}")
+    
     for message in messages:
-        if message.get("from_me"):
-            continue
-        
-        # Deduplication - skip if already processed
         msg_id = message.get("id")
-        if is_message_processed(msg_id):
-            continue
-        mark_message_processed(msg_id)
-        
+        from_me = message.get("from_me")
         phone = message.get("from")
         text = message.get("text", {}).get("body", "")
         name = message.get("contact", {}).get("name", "Customer")
         
-        if not text:
+        print(f"\n--- MESSAGE ---")
+        print(f"  msg_id: {msg_id}")
+        print(f"  from_me: {from_me}")
+        print(f"  phone: {phone}")
+        print(f"  text: {text[:100] if text else '(empty)'}")
+        
+        # Skip outgoing messages (from us)
+        if from_me:
+            print(f"  >>> SKIP: from_me=True (our own message)")
             continue
         
-        print(f"\n📩 From {phone}: {text[:100]}")
+        # Deduplication
+        if is_message_processed(msg_id):
+            print(f"  >>> SKIP: already processed (msg_id={msg_id})")
+            continue
+        mark_message_processed(msg_id)
+        
+        if not text:
+            print(f"  >>> SKIP: empty text")
+            continue
+        
+        print(f"  >>> PROCESSING...")
         
         save_message(phone, text, "incoming")
         save_conversation(phone, name, text)
         
         response = generate_ai_response(phone, text)
         
+        print(f"  >>> RESPONSE: {response[:100] if response else '(none)'}...")
+        
         save_message(phone, response, "outgoing")
         send_whatsapp_message(phone, response)
         
-        print(f"🤖 Response: {response[:100]}...")
+        print(f"  >>> SENT OK")
     
+    print(f"=== WEBHOOK DONE ===\n")
     return jsonify({"status": "ok"})
 
 @app.route("/webhook/status", methods=["POST"])
