@@ -77,6 +77,7 @@ def init_db():
             last_message TEXT,
             last_message_time TIMESTAMP,
             state TEXT DEFAULT 'new',
+            quote_state TEXT DEFAULT 'none',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -170,24 +171,47 @@ def send_whatsapp_message(to, text):
         return {"error": str(e)}
 
 def generate_ai_response(phone, user_message):
-    """Generate AI response using Groq (free, unlimited)"""
+    """Generate AI response - checks automation first, then falls back to Groq"""
     
-    # Get conversation context
-    context = get_conversation_context(phone)
+    text = user_message.strip()
+    text_lower = text.lower()
     
-    # Build messages
+    # Cancel commands
+    if text_lower in ["cancel", "stop", "exit", "nevermind", "forget it"]:
+        if cancel_quote_flow(phone):
+            return cancel_quote_flow(phone)
+    
+    # Check if in quote flow
+    quote_response = handle_quote_flow(phone, text)
+    if quote_response:
+        return quote_response
+    
+    # Check for tracking intent
+    tracking_response = auto_track_shipment(phone, text)
+    if tracking_response:
+        return tracking_response
+    
+    # Check for new quote request keywords
+    quote_keywords = ["quote", "price", "cost", "rate", "how much", "shipping cost", "get a quote"]
+    if any(kw in text_lower for kw in quote_keywords):
+        return start_quote_flow(phone)
+    
+    # Check for booking
+    if text_lower == "book" or "confirm booking" in text_lower:
+        return ("🙏 Booking request received!\n\n"
+                "Our team will contact you shortly to finalize your shipment.\n"
+                "📧 Or email us: info@globalline.io\n"
+                "📱 Call us: +44 7490 347577")
+    
+    # Fall back to AI chat
+    context = get_conversation_context(phone, limit=10)
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    
-    # Add recent conversation for continuity
     for msg in context:
         role = "user" if msg["direction"] == "incoming" else "assistant"
         messages.append({"role": role, "content": msg["message"]})
-    
-    # Add current message
-    messages.append({"role": "user", "content": user_message})
+    messages.append({"role": "user", "content": text})
     
     try:
-        # Call Groq API
         data = json.dumps({
             "model": "llama-3.1-8b-instant",
             "messages": messages,
@@ -207,18 +231,12 @@ def generate_ai_response(phone, user_message):
         
         with urllib.request.urlopen(req, timeout=30) as response:
             result = json.loads(response.read().decode())
-            ai_response = result["choices"][0]["message"]["content"]
-            
-            # Check if quote request
-            if "quote" in user_message.lower():
-                save_quote_request(phone, user_message)
-            
-            return ai_response
+            return result["choices"][0]["message"]["content"]
         
     except Exception as e:
         print(f"Groq Error: {e}")
         return """Thanks for your message! Our team will get back to you shortly. 
-        
+
 For immediate help: info@globalline.io or call us 🚢"""
 
 def save_quote_request(phone, message):
@@ -230,6 +248,168 @@ def save_quote_request(phone, message):
     
     send_whatsapp_message(ADMIN_NUMBER, 
         f"🔔 New Quote Request!\n\nFrom: {phone}\n\nMessage: {message[:200]}")
+
+# ==========================================
+# AUTOMATION: TRACKING
+# ==========================================
+
+def auto_track_shipment(phone, text):
+    """Extract tracking number and return status"""
+    import re
+    # Common patterns: GL123456, TRK123456, 10+ alphanumeric
+    patterns = [
+        r'\b(GL|TRK|GLB)[A-Z0-9]{6,12}\b',
+        r'\b[A-Z]{2,3}[0-9]{6,10}\b',
+        r'\b(\d{10,15})\b',
+    ]
+    
+    tracking_number = None
+    for pattern in patterns:
+        match = re.search(pattern, text.upper())
+        if match:
+            tracking_number = match.group(0).upper()
+            break
+    
+    if not tracking_number:
+        return None  # No tracking number found
+    
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute("SELECT * FROM shipments WHERE tracking_number = ?", (tracking_number,))
+    shipment = c.fetchone()
+    conn.close()
+    
+    if shipment:
+        return (f"📦 Shipment Found!\n\n"
+                f"🔢 Tracking: {shipment['tracking_number']}\n"
+                f"📊 Status: {shipment['status']}\n"
+                f"📍 Origin: {shipment['origin']}\n"
+                f"📍 Destination: {shipment['destination']}\n"
+                f"📅 Created: {shipment['created_at'][:10]}")
+    else:
+        return (f"🔍 {tracking_number} not found in our system.\n\n"
+                f"Please double-check your tracking number or contact us at info@globalline.io for assistance.")
+
+# ==========================================
+# AUTOMATION: QUOTE FLOW
+# ==========================================
+
+QUOTE_QUESTIONS = {
+    "awaiting_origin": "🌍 I can help with that! Where are we shipping from?\n\nPlease enter the origin city or country:",
+    "awaiting_destination": "📍 Got it! Where are we shipping to?\n\nPlease enter the destination city or country:",
+    "awaiting_weight": "⚖️ Perfect! What is the approximate weight?\n\nPlease enter in kg (e.g. 5kg, 10kg):",
+    "awaiting_service": """📋 What service do you prefer?
+
+1️⃣ Air Freight (1-3 days) - NGN 4,000-6,500/kg
+2️⃣ Ocean Freight (15-45 days) - NGN 380-3,000/kg
+3️⃣ Road Freight (1-7 days)
+
+Just reply with 1, 2 or 3:""",
+}
+
+SERVICE_MAP = {
+    "1": ("Air Freight", "NGN 4,000-6,500/kg"),
+    "2": ("Ocean Freight", "NGN 380-3,000/kg"),
+    "3": ("Road Freight", "Contact for rate"),
+}
+
+def start_quote_flow(phone):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE conversations SET quote_state = 'awaiting_origin' WHERE phone = ?", (phone,))
+    conn.commit()
+    conn.close()
+    return QUOTE_QUESTIONS["awaiting_origin"]
+
+def handle_quote_flow(phone, text):
+    """Process each step of the quote flow"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute("SELECT quote_state FROM conversations WHERE phone = ?", (phone,))
+    row = c.fetchone()
+    conn.close()
+    
+    if not row or row["quote_state"] == "none":
+        return None
+    
+    state = row["quote_state"]
+    response = None
+    
+    if state == "awaiting_origin":
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("UPDATE quote_requests SET origin = ? WHERE phone = ? AND status = 'pending'", (text.strip(), phone))
+        if c.rowcount == 0:
+            c.execute("INSERT INTO quote_requests (phone, origin, status) VALUES (?, ?, 'pending')", (phone, text.strip()))
+        c.execute("UPDATE conversations SET quote_state = 'awaiting_destination' WHERE phone = ?", (phone,))
+        conn.commit()
+        conn.close()
+        response = QUOTE_QUESTIONS["awaiting_destination"]
+    
+    elif state == "awaiting_destination":
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("UPDATE quote_requests SET destination = ? WHERE phone = ? AND status = 'pending'", (text.strip(), phone))
+        c.execute("UPDATE conversations SET quote_state = 'awaiting_weight' WHERE phone = ?", (phone,))
+        conn.commit()
+        conn.close()
+        response = QUOTE_QUESTIONS["awaiting_weight"]
+    
+    elif state == "awaiting_weight":
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("UPDATE quote_requests SET weight = ? WHERE phone = ? AND status = 'pending'", (text.strip(), phone))
+        c.execute("UPDATE conversations SET quote_state = 'awaiting_service' WHERE phone = ?", (phone,))
+        conn.commit()
+        conn.close()
+        response = QUOTE_QUESTIONS["awaiting_service"]
+    
+    elif state == "awaiting_service":
+        service_key = text.strip().lower()
+        service_name, price_range = SERVICE_MAP.get(service_key, ("Unknown", "Contact us"))
+        
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("UPDATE quote_requests SET service_type = ?, status = 'quoted' WHERE phone = ? AND status = 'pending'", (service_name, phone))
+        c.execute("UPDATE conversations SET quote_state = 'none' WHERE phone = ?", (phone,))
+        conn.commit()
+        conn.close()
+        
+        # Get full quote details
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("SELECT * FROM quote_requests WHERE phone = ? ORDER BY id DESC LIMIT 1", (phone,))
+        quote = c.fetchone()
+        conn.close()
+        
+        if quote:
+            response = (f"📦 Quote Ready!\n\n"
+                       f"📍 From: {quote['origin']}\n"
+                       f"📍 To: {quote['destination']}\n"
+                       f"⚖️ Weight: {quote['weight']}\n"
+                       f"🚢 Service: {service_name}\n"
+                       f"💰 Est. Rate: {price_range}\n\n"
+                       f"To proceed, contact us:\n"
+                       f"📧 info@globalline.io\n"
+                       f"📱 WhatsApp: Reply 'BOOK' to confirm booking")
+            
+            # Alert admin
+            send_whatsapp_message(ADMIN_NUMBER,
+                f"🔔 Quote Generated!\n\nFrom: {phone}\n{quote['origin']} → {quote['destination']}\n{quote['weight']}\n{service_name}")
+    
+    return response
+
+def cancel_quote_flow(phone):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE conversations SET quote_state = 'none' WHERE phone = ?", (phone,))
+    c.execute("DELETE FROM quote_requests WHERE phone = ? AND status = 'pending'", (phone,))
+    conn.commit()
+    conn.close()
+    return "Got it! Quote request cancelled. Message me anytime to start a new request. 😊"
 
 # ==========================================
 # WEBHOOKS
@@ -380,6 +560,76 @@ Ready to ship? Reply YES to proceed!
     conn.close()
     
     return jsonify({"success": True, "estimated": estimated})
+
+@app.route("/api/add-shipment", methods=["POST"])
+def add_shipment():
+    """Add a new shipment (creates tracking number)"""
+    data = request.json
+    phone = data.get("phone")
+    origin = data.get("origin", "Unknown")
+    destination = data.get("destination", "Unknown")
+    status = data.get("status", "Order Received")
+    
+    import uuid
+    tracking_number = "GL" + str(uuid.uuid4().int)[:10]
+    
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO shipments (tracking_number, phone, origin, destination, status)
+        VALUES (?, ?, ?, ?, ?)
+    """, (tracking_number, phone, origin, destination, status))
+    conn.commit()
+    conn.close()
+    
+    confirmation = (f"📦 Shipment Created!\n\n"
+                   f"🔢 Tracking: {tracking_number}\n"
+                   f"📍 {origin} → {destination}\n"
+                   f"📊 Status: {status}")
+    
+    if phone:
+        send_whatsapp_message(phone, confirmation)
+    
+    return jsonify({
+        "status": "ok",
+        "tracking_number": tracking_number,
+        "origin": origin,
+        "destination": destination,
+        "status": status
+    })
+
+@app.route("/api/shipments", methods=["GET"])
+def list_shipments():
+    """List all shipments"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute("SELECT * FROM shipments ORDER BY created_at DESC LIMIT 100")
+    rows = c.fetchall()
+    conn.close()
+    return jsonify({"shipments": [dict(r) for r in rows]})
+
+@app.route("/api/update-shipment", methods=["POST"])
+def update_shipment():
+    """Update shipment status"""
+    data = request.json
+    tracking_number = data.get("tracking_number")
+    status = data.get("status")
+    phone = data.get("phone")
+    
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE shipments SET status = ? WHERE tracking_number = ?", (status, tracking_number))
+    conn.commit()
+    
+    if c.rowcount > 0 and phone:
+        update_msg = (f"📦 Shipment Update!\n\n"
+                     f"🔢 {tracking_number}\n"
+                     f"📊 Status: {status}")
+        send_whatsapp_message(phone, update_msg)
+    
+    conn.close()
+    return jsonify({"ok": c.rowcount > 0})
 
 @app.route("/api/track", methods=["POST"])
 def track_shipment():
