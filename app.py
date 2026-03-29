@@ -148,14 +148,29 @@ def is_message_processed(msg_id):
     return exists
 
 def mark_message_processed(msg_id):
-    """Mark a message as processed"""
+    """Mark a message as processed - ATOMIC with INSERT OR IGNORE"""
     if not msg_id:
         return
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("INSERT OR IGNORE INTO processed_messages (msg_id) VALUES (?)", (msg_id,))
     conn.commit()
+    inserted = c.rowcount > 0
     conn.close()
+    return inserted
+
+def try_mark_and_check(msg_id):
+    """ATOMIC: mark as processed AND return True only if it was new"""
+    if not msg_id:
+        return True  # If no msg_id, process anyway
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    # Try to insert - if msg_id already exists, this does nothing and rowcount=0
+    c.execute("INSERT OR IGNORE INTO processed_messages (msg_id) VALUES (?)", (msg_id,))
+    inserted = c.rowcount > 0
+    conn.commit()
+    conn.close()
+    return inserted  # True = new message (was inserted), False = already existed
 
 def get_conversation_context(phone, limit=10):
     conn = sqlite3.connect(DB_PATH)
@@ -577,11 +592,10 @@ def webhook_whapi():
             print(f"  >>> SKIP: from_me=True (our own message)")
             continue
         
-        # Deduplication
-        if is_message_processed(msg_id):
+        # Deduplication - ATOMIC: try to claim this msg_id
+        if not try_mark_and_check(msg_id):
             print(f"  >>> SKIP: already processed (msg_id={msg_id})")
             continue
-        mark_message_processed(msg_id)
         
         if not text:
             print(f"  >>> SKIP: empty text")
