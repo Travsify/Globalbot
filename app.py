@@ -187,17 +187,27 @@ def get_conversation_context(phone, limit=10):
     return [dict(r) for r in reversed(rows)]
 
 def save_conversation(phone, name=None, last_message=None):
+    """Save conversation - preserves quote_state by using UPDATE"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    # Use raw SQL to preserve quote_state on update
+    now = datetime.now().isoformat()
+    
+    # First try UPDATE (preserves quote_state)
     c.execute("""
-        INSERT INTO conversations (phone, name, last_message, last_message_time) 
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(phone) DO UPDATE SET
-            name = COALESCE(excluded.name, name),
-            last_message = excluded.last_message,
-            last_message_time = excluded.last_message_time
-    """, (phone, name, last_message, datetime.now().isoformat()))
+        UPDATE conversations 
+        SET name = COALESCE(?, name),
+            last_message = COALESCE(?, last_message),
+            last_message_time = ?
+        WHERE phone = ?
+    """, (name, last_message, now, phone))
+    
+    if c.rowcount == 0:
+        # Phone not in DB yet - insert new row
+        c.execute("""
+            INSERT INTO conversations (phone, name, last_message, last_message_time, quote_state)
+            VALUES (?, ?, ?, ?, 'none')
+        """, (phone, name, last_message, now))
+    
     conn.commit()
     conn.close()
 
