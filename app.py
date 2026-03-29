@@ -312,10 +312,10 @@ def generate_ai_response(phone, user_message):
     # Cancel commands - always handled
     if text_lower in ["cancel", "stop", "exit", "nevermind", "forget it"]:
         print(f"  >>> PATH: cancel")
-        result = cancel_quote_flow(phone)
+        result = cancel_booking_flow(phone)
         if result:
             return result
-        result = cancel_booking_flow(phone)
+        result = cancel_quote_flow(phone)
         if result:
             return result
     
@@ -461,37 +461,42 @@ def auto_track_shipment(phone, text):
 # ==========================================
 
 QUOTE_QUESTIONS = {
-    "awaiting_origin": "🌍 I can help with that! Where are we shipping from?\n\nPlease enter the origin city or country:",
-    "awaiting_destination": "📍 Got it! Where are we shipping to?\n\nPlease enter the destination city or country:",
-    "awaiting_weight": "⚖️ Perfect! What is the approximate weight?\n\nPlease enter in kg (e.g. 5kg, 10kg):",
-    "awaiting_service": """📋 What service do you prefer?
+    "awaiting_destination": """🌍 Where are we shipping to?
 
-1️⃣ Air Freight (1-3 days) - NGN 4,000-6,500/kg
-2️⃣ Ocean Freight (15-45 days) - NGN 380-3,000/kg
-3️⃣ Road Freight (1-7 days)
+1️⃣ 🇬🇧 United Kingdom
+2️⃣ 🇺🇸 United States
+3️⃣ 🇨🇦 Canada""",
+    "awaiting_weight": "⚖️ Perfect! What is the approximate weight?\n\n(in kg, e.g. 5kg, 10kg, 200kg)",
+    "awaiting_service": """📋 How would you like it shipped?
 
-Just reply with 1, 2 or 3:""",
+1️⃣ ✈️ Air Freight (5-9 days)
+2️⃣ 🚢 Sea Freight (25-42 days)
+
+Just reply with 1 or 2:""",
 }
 
 SERVICE_MAP = {
     "1": ("Air Freight", "NGN 4,000-6,500/kg"),
-    "2": ("Ocean Freight", "NGN 380-3,000/kg"),
-    "3": ("Road Freight", "Contact for rate"),
+    "2": ("Sea Freight", "NGN 380-3,000/kg"),
+}
+
+DEST_QUOTE_RATES = {
+    "uk": {"air": 4500, "sea": 450},
+    "us": {"air": 4500, "sea": 500},
+    "ca": {"air": 6500, "sea": 3000},
 }
 
 def start_quote_flow(phone):
     # Just return the first question - handle_quote_flow will INSERT the quote_request
-    return QUOTE_QUESTIONS["awaiting_origin"]
+    return QUOTE_QUESTIONS["awaiting_destination"]
 def handle_quote_flow(phone, text):
-    """Process each step of the quote flow - uses quote_requests table only"""
+    """Process quote flow: destination → weight → service → price estimate"""
     print(f"\n--- QUOTE FLOW ---")
     print(f"  phone: {phone}, text: {text}")
     
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
-    
-    # Get the PENDING quote request for this phone (if any)
     c.execute("""
         SELECT * FROM quote_requests 
         WHERE phone = ? AND status = 'pending'
@@ -502,73 +507,85 @@ def handle_quote_flow(phone, text):
     
     print(f"  quote row: {dict(quote) if quote else 'None'}")
     
-    # Determine next step based on which fields are filled
+    # Step 1: Destination
     if not quote:
-        # No pending quote - this is the FIRST step (origin)
-        print(f"  >>> STEP: origin (new quote)")
+        dest_key = text.strip()
+        dest_map = {"1": "🇬🇧 United Kingdom", "2": "🇺🇸 United States", "3": "🇨🇦 Canada"}
+        if dest_key not in dest_map:
+            return ("I didn't understand that. Please reply with 1, 2 or 3:\n\n" + 
+                   QUOTE_QUESTIONS["awaiting_destination"])
+        
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        c.execute("INSERT INTO quote_requests (phone, origin, status) VALUES (?, ?, 'pending')",
-            (phone, text.strip()))
-        conn.commit()
-        conn.close()
-        return QUOTE_QUESTIONS["awaiting_destination"]
-    
-    elif quote['destination'] is None:
-        print(f"  >>> STEP: destination")
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("UPDATE quote_requests SET destination = ? WHERE phone = ? AND status = 'pending' AND destination IS NULL",
-            (text.strip(), phone))
+        c.execute("INSERT INTO quote_requests (phone, origin, destination, status) VALUES (?, 'Nigeria', ?, 'pending')",
+            (phone, dest_map[dest_key]))
         conn.commit()
         conn.close()
         return QUOTE_QUESTIONS["awaiting_weight"]
     
+    # Step 2: Weight
     elif quote['weight'] is None:
-        print(f"  >>> STEP: weight")
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        c.execute("UPDATE quote_requests SET weight = ? WHERE phone = ? AND status = 'pending' AND weight IS NULL",
+        c.execute("UPDATE quote_requests SET weight = ? WHERE phone = ? AND status = 'pending'",
             (text.strip(), phone))
         conn.commit()
         conn.close()
         return QUOTE_QUESTIONS["awaiting_service"]
     
+    # Step 3: Service → Calculate and show quote
     elif quote['service_type'] is None:
-        print(f"  >>> STEP: service")
-        service_key = text.strip().lower()
-        service_name, price_range = SERVICE_MAP.get(service_key, (None, None))
-        
-        if not service_name:
-            return ("I didn't understand that. Please reply with 1, 2 or 3:\n\n" + 
+        service_key = text.strip()
+        if service_key not in ["1", "2"]:
+            return ("I didn't understand that. Please reply with 1 or 2:\n\n" +
                    QUOTE_QUESTIONS["awaiting_service"])
+        
+        dest = quote['destination']
+        if "United Kingdom" in dest:
+            dest_key = "uk"
+        elif "United States" in dest:
+            dest_key = "us"
+        else:
+            dest_key = "ca"
+        
+        try:
+            weight_kg = float(''.join(filter(lambda x: x.isdigit() or x=='.', quote['weight'] or '10')))
+        except:
+            weight_kg = 10.0
+        
+        rates = DEST_QUOTE_RATES[dest_key]
+        if service_key == "1":
+            service_name = "Air Freight"
+            price_per_kg = rates["air"]
+            min_charge = 4500 if dest_key != "ca" else 6000
+            transit = "5-9 business days"
+        else:
+            service_name = "Sea Freight"
+            price_per_kg = rates["sea"]
+            min_charge = 2000 if dest_key != "ca" else 3000
+            transit = "25-42 days"
+        
+        total = max(weight_kg * price_per_kg, min_charge)
+        price_str = f"₦{int(total):,}"
         
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        c.execute("UPDATE quote_requests SET service_type = ?, status = 'quoted' WHERE phone = ? AND status = 'pending' AND service_type IS NULL",
-            (service_name, phone))
+        c.execute("UPDATE quote_requests SET service_type = ?, estimated_price = ?, status = 'quoted' WHERE phone = ? AND status = 'pending'",
+            (f"{service_name} ({transit})", price_str, phone))
         conn.commit()
         conn.close()
         
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        c = conn.cursor()
-        c.execute("SELECT * FROM quote_requests WHERE phone = ? ORDER BY id DESC LIMIT 1", (phone,))
-        quote = c.fetchone()
-        conn.close()
-        
         response = (f"📦 Quote Ready!\n\n"
-                   f"📍 From: {quote['origin']}\n"
+                   f"📍 From: Nigeria\n"
                    f"📍 To: {quote['destination']}\n"
-                   f"⚖️ Weight: {quote['weight']}\n"
-                   f"🚢 Service: {service_name}\n"
-                   f"💰 Est. Rate: {price_range}\n\n"
-                   f"To proceed, contact us:\n"
-                   f"📧 info@globalline.io\n"
-                   f"📱 Reply 'BOOK' to confirm booking")
+                   f"⚖️ Weight: {weight_kg:.0f}kg\n"
+                   f"🚢 {service_name} ({transit})\n"
+                   f"💰 Estimated Total: {price_str}\n\n"
+                   f"To book now, reply BOOK\n"
+                   f"📧 Or email: info@globalline.io")
         
         send_whatsapp_message(ADMIN_NUMBER,
-            f"🔔 Quote Generated!\n\nFrom: {phone}\n{quote['origin']} → {quote['destination']}\n{quote['weight']}\n{service_name}")
+            f"🔔 Quote Generated!\n\nFrom: {phone}\nNigeria → {quote['destination']}\n{weight_kg:.0f}kg\n{service_name}\nEst: {price_str}")
         
         return response
     
@@ -577,91 +594,17 @@ def handle_quote_flow(phone, text):
         return MAIN_MENU
 
 
-def cancel_quote_flow(phone):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("UPDATE conversations SET quote_state = 'none' WHERE phone = ?", (phone,))
-    c.execute("DELETE FROM quote_requests WHERE phone = ? AND status = 'pending'", (phone,))
-    conn.commit()
-    conn.close()
-    return MAIN_MENU
-
-# ==========================================
-# PAYSTACK PAYMENT LINK
-# ==========================================
-
-def create_paystack_payment_link(amount_kobo, email, phone, description, ref):
-    """Create a Paystack payment link"""
-    if not PAYSTACK_SECRET_KEY:
-        return None
-    
-    url = "https://api.paystack.co/transaction/link"
-    headers = {
-        "Authorization": f"Bearer {PAYSTACK_SECRET_KEY}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "amount": amount_kobo,
-        "email": email or f"{phone}@globalline.io",
-        "currency": "NGN",
-        "reference": ref,
-        "description": description,
-        "customer_phone": phone,
-        "metadata": {
-            "phone": phone,
-            "custom_fields": [
-                {"variable_name": "customer_phone", "value": phone}
-            ]
-        }
-    }
-    
-    try:
-        response = requests.post(url, headers=headers, json=payload, timeout=15)
-        result = response.json()
-        if result.get("status"):
-            return result["data"]["link"]
-        else:
-            print(f"Paystack error: {result}")
-            return None
-    except Exception as e:
-        print(f"Paystack exception: {e}")
-        return None
-
-# ==========================================
-# BOOKING FLOW
-# ==========================================
-
-BOOKING_QUESTIONS = {
-    "receiver_name": "📦 Let's book your shipment!\n\nWhat is the receiver's full name?",
-    "receiver_phone": "✅ Got it!\n\nWhat is the receiver's phone number?",
-    "receiver_address": "📱 Great!\n\nWhat is the receiver's full address?\n(city, country, street)",
-    "cargo_description": "📍 Perfect!\n\nWhat are you shipping?\n(brief description of cargo)",
-    "weight": "📝 What is the estimated weight?\n\n(in kg, e.g. 10kg, 25kg)",
-    "service_type": """⚖️ How would you like it shipped?
-
-1️⃣ Air Freight (1-3 days) - NGN 4,000-6,500/kg
-2️⃣ Ocean Freight (15-45 days) - NGN 380-3,000/kg
-3️⃣ Road Freight (1-7 days)
-
-Just reply with 1, 2, or 3:""",
-}
-
-SERVICE_PRICES = {
-    "1": ("Air Freight", 4500),   # NGN per kg
-    "2": ("Ocean Freight", 700),
-    "3": ("Road Freight", 1500),
-}
 
 def start_booking_flow(phone):
     """Start a new booking - insert empty row"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("""
-        INSERT INTO bookings (phone, status) VALUES (?, 'collecting')
+        INSERT INTO bookings (phone, status, origin) VALUES (?, 'collecting', 'Nigeria')
     """, (phone,))
     conn.commit()
     conn.close()
-    return BOOKING_QUESTIONS["receiver_name"]
+    return BOOKING_QUESTIONS["destination"]
 
 def get_current_booking(phone):
     """Get the active collecting booking for this phone"""
@@ -688,9 +631,26 @@ def handle_booking_flow(phone, text):
         print("  No active booking")
         return None  # Not in booking flow
     
-    # Determine which field to fill next
-    if booking['receiver_name'] is None:
-        print("  >>> FILL: receiver_name")
+    # Step 1: Destination
+    if booking.get('destination') is None:
+        dest_key = text.strip()
+        if dest_key not in DESTINATIONS:
+            return ("I didn't understand that. Please reply with 1, 2, or 3:\n\n" + 
+                   BOOKING_QUESTIONS["destination"])
+        
+        dest_name, dest_airport = DESTINATIONS[dest_key]
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("UPDATE bookings SET destination = ? WHERE id = ?", (dest_name, booking['id']))
+        conn.commit()
+        conn.close()
+        
+        # Store dest_key for pricing calculation
+        # (We use the destination text as the key for now)
+        return BOOKING_QUESTIONS["receiver_name"]
+    
+    # Step 2: Receiver name
+    elif booking.get('receiver_name') is None:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute("UPDATE bookings SET receiver_name = ? WHERE id = ?", (text.strip(), booking['id']))
@@ -698,8 +658,8 @@ def handle_booking_flow(phone, text):
         conn.close()
         return BOOKING_QUESTIONS["receiver_phone"]
     
-    elif booking['receiver_phone'] is None:
-        print("  >>> FILL: receiver_phone")
+    # Step 3: Receiver phone
+    elif booking.get('receiver_phone') is None:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute("UPDATE bookings SET receiver_phone = ? WHERE id = ?", (text.strip(), booking['id']))
@@ -707,8 +667,8 @@ def handle_booking_flow(phone, text):
         conn.close()
         return BOOKING_QUESTIONS["receiver_address"]
     
-    elif booking['receiver_address'] is None:
-        print("  >>> FILL: receiver_address")
+    # Step 4: Receiver address
+    elif booking.get('receiver_address') is None:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute("UPDATE bookings SET receiver_address = ? WHERE id = ?", (text.strip(), booking['id']))
@@ -716,8 +676,8 @@ def handle_booking_flow(phone, text):
         conn.close()
         return BOOKING_QUESTIONS["cargo_description"]
     
-    elif booking['cargo_description'] is None:
-        print("  >>> FILL: cargo_description")
+    # Step 5: Cargo description
+    elif booking.get('cargo_description') is None:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute("UPDATE bookings SET cargo_description = ? WHERE id = ?", (text.strip(), booking['id']))
@@ -725,35 +685,70 @@ def handle_booking_flow(phone, text):
         conn.close()
         return BOOKING_QUESTIONS["weight"]
     
-    elif booking['weight'] is None:
-        print("  >>> FILL: weight")
+    # Step 6: Weight - show service options with prices
+    elif booking.get('weight') is None:
+        weight_kg_str = text.strip()
+        # Extract number from weight string
+        try:
+            weight_kg = float(''.join(filter(lambda x: x.isdigit() or x=='.', weight_kg_str)))
+        except:
+            weight_kg = 10.0
+        
+        weight_kg_str = str(weight_kg)
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        c.execute("UPDATE bookings SET weight = ? WHERE id = ?", (text.strip(), booking['id']))
+        c.execute("UPDATE bookings SET weight = ? WHERE id = ?", (weight_kg_str, booking['id']))
         conn.commit()
         conn.close()
-        return BOOKING_QUESTIONS["service_type"]
+        
+        # Show service options with real prices for this destination
+        dest = booking.get('destination', '')
+        dest_key = "1"  # default UK
+        if "United States" in dest:
+            dest_key = "2"
+        elif "Canada" in dest:
+            dest_key = "3"
+        
+        # Get rates for this destination
+        air_info = AIR_RATES[dest_key]
+        sea_info = SEA_RATES[dest_key]
+        air_name, air_price_low, air_price_high, air_transit = air_info
+        sea_name, sea_price_low, sea_price_high, sea_transit = sea_info
+        sea_min = MIN_CHARGES_SEA[dest_key]
+        air_min = MIN_CHARGES_AIR[dest_key]
+        
+        service_msg = f"""⚖️ How would you like it shipped?
+
+1️⃣ ✈️ {air_name} ({air_transit})
+   {weight_kg:.0f}kg × ₦{air_price_low:,}/kg = ₦{max(weight_kg*air_price_low, air_min):,.0f}
+   (Min charge: ₦{air_min:,})
+
+2️⃣ 🚢 {sea_name} ({sea_transit})
+   {weight_kg:.0f}kg × ₦{sea_price_low:,}/kg = ₦{max(weight_kg*sea_price_low, sea_min):,.0f}
+   (Min charge: ₦{sea_min:,})
+
+Just reply with 1 or 2:"""
+        
+        return service_msg
     
-    elif booking['service_type'] is None:
-        print("  >>> FILL: service_type")
+    # Step 7: Service type + payment
+    elif booking.get('service_type') is None:
         service_key = text.strip()
-        service_info = SERVICE_PRICES.get(service_key)
+        if service_key not in ["1", "2"]:
+            return ("I didn't understand that. Please reply with 1 or 2:\n\n" +
+                   "1️⃣ Air Freight\n2️⃣ Sea Freight")
         
-        if not service_info:
-            return ("I didn't understand that. Please reply with 1, 2, or 3:\n\n" + 
-                   BOOKING_QUESTIONS["service_type"])
+        # Determine destination key
+        dest = booking.get('destination', '')
+        dest_key = "1"
+        if "United States" in dest:
+            dest_key = "2"
+        elif "Canada" in dest:
+            dest_key = "3"
         
-        service_name, price_per_kg = service_info
-        
-        # Get weight as number
-        try:
-            weight_kg = float(''.join(filter(lambda x: x.isdigit() or x=='.', text)))
-        except:
-            weight_kg = 10  # default
-        
-        # Calculate total (weight * price per kg in kobo)
-        total_kobo = int(weight_kg * price_per_kg * 100)
-        estimated_price = f"₦{int(weight_kg * price_per_kg):,}"
+        weight_kg = float(''.join(filter(lambda x: x.isdigit() or x=='.', booking.get('weight', '10'))))
+        service_name, price_per_kg, min_charge, total, transit = get_rate(dest_key, service_key, weight_kg)
+        estimated_price = f"₦{int(total):,}"
         
         # Generate reference
         import uuid
@@ -763,38 +758,29 @@ def handle_booking_flow(phone, text):
         c = conn.cursor()
         c.execute("""
             UPDATE bookings SET service_type = ?, estimated_price = ?, paystack_ref = ? WHERE id = ?
-        """, (service_name, estimated_price, ref, booking['id']))
+        """, (f"{service_name} ({transit})", estimated_price, ref, booking['id']))
         conn.commit()
         conn.close()
         
         # Create Paystack payment link
-        description = f"Shipping: {booking.get('cargo_description', 'Cargo')} - {weight_kg}kg {service_name}"
-        payment_link = create_paystack_payment_link(
-            total_kobo, 
-            None,  # email - optional
-            phone, 
-            description, 
-            ref
-        )
+        description = f"Shipping Nigeria → {dest}: {booking.get('cargo_description', 'Cargo')} - {weight_kg}kg"
+        total_kobo = int(total * 100)
+        payment_link = create_paystack_payment_link(total_kobo, None, phone, description, ref)
         
-        # Send payment message with button
-        price_display = estimated_price
         msg = (f"💰 Booking Summary:\n\n"
-               f"📍 From: {booking.get('origin', 'Nigeria')}\n"
-               f"📍 To: {booking.get('receiver_address', 'N/A')}\n"
-               f"📦 {booking.get('cargo_description', 'Cargo')} - {booking.get('weight', weight_kg)}\n"
-               f"🚢 {service_name}\n"
-               f"💰 Total: {price_display}\n\n"
+               f"📍 From: Nigeria\n"
+               f"📍 To: {booking.get('destination', 'N/A')}\n"
+               f"📍 Delivery: {booking.get('receiver_address', 'N/A')}\n"
+               f"📦 {booking.get('cargo_description', 'Cargo')} - {weight_kg}kg\n"
+               f"🚢 {service_name} ({transit})\n"
+               f"💰 Total: {estimated_price}\n\n"
                f"Click below to pay:")
         
         if payment_link:
-            # Send as message with inline button
             send_whatsapp_button(phone, msg, payment_link)
         else:
-            # Fallback without button
-            send_whatsapp_message(phone, msg + f"\n\n🔗 Pay here: https://paystack.com/pay/REF")
+            send_whatsapp_message(phone, msg + f"\n\n🔗 Pay here: https://paystack.com/pay/{ref}")
         
-        # Mark as awaiting payment
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute("UPDATE bookings SET status = 'awaiting_payment' WHERE id = ?", (booking['id'],))
@@ -805,11 +791,11 @@ def handle_booking_flow(phone, text):
                 "Complete payment and your tracking number will be activated.\n"
                 "Reply 'STATUS' to check your booking.")
     
-    elif booking['service_type'] is not None and booking['paystack_ref'] is not None:
-        # Already selected service, waiting for payment
+    elif booking.get('paystack_ref') is not None:
+        # Already created payment, waiting
         return ("⏳ Payment pending.\n\n"
-                "Once you complete payment, reply 'STATUS' to confirm.\n"
-                "Or click your payment link again.")
+                f"Click to pay: https://paystack.com/pay/{booking['paystack_ref']}\n\n"
+                "After payment, reply 'STATUS' to get your tracking.")
     
     else:
         print("  >>> Booking flow complete (unexpected state)")
@@ -878,16 +864,18 @@ def check_booking_status_message(phone):
         return (f"📦 Booking Confirmed!\n\n"
                f"🔢 Tracking: {dict(shipment)['tracking_number']}\n"
                f"📊 Status: {dict(shipment)['status']}\n"
+               f"📍 Nigeria → {booking.get('destination', 'N/A')}\n"
                f"🚢 {booking['service_type']}\n"
-               f"📍 To: {booking['receiver_address']}\n\n"
+               f"📍 Delivery: {booking.get('receiver_address', 'N/A')}\n\n"
                f"We'll keep you updated! 🚢")
     
     elif booking['status'] == 'awaiting_payment' or booking['payment_status'] == 'pending':
         msg = (f"⏳ Payment Pending\n\n"
-              f"📦 {booking['cargo_description']} - {booking['weight']}\n"
-              f"🚢 {booking['service_type']}\n"
-              f"💰 Total: {booking['estimated_price']}\n\n"
-              f"Click to pay: https://paystack.com/pay/{booking['paystack_ref']}\n\n"
+              f"📍 Nigeria → {booking.get('destination', 'N/A')}\n"
+              f"📦 {booking.get('cargo_description', 'Cargo')} - {booking.get('weight', 'N/A')}kg\n"
+              f"🚢 {booking.get('service_type', 'N/A')}\n"
+              f"💰 Total: {booking.get('estimated_price', 'N/A')}\n\n"
+              f"Click to pay: https://paystack.com/pay/{booking.get('paystack_ref', 'N/A')}\n\n"
               f"After payment, reply STATUS to get your tracking number.")
         return msg
     
@@ -1016,17 +1004,18 @@ def webhook_paystack():
                     INSERT INTO shipments (tracking_number, phone, origin, destination, status)
                     VALUES (?, ?, ?, ?, 'Order Confirmed')
                 """, (tracking, booking['phone'], 
-                      booking.get('origin', 'Nigeria'),
-                      booking.get('receiver_address', 'N/A')))
+                      "Nigeria",
+                      booking.get('destination', 'N/A')))
                 conn.commit()
                 conn.close()
                 
                 # Notify customer
                 msg = (f"✅ PAYMENT CONFIRMED!\n\n"
                        f"🔢 Your Tracking Number: {tracking}\n\n"
-                       f"📦 {booking['cargo_description']} - {booking['weight']}\n"
+                       f"📦 {booking['cargo_description']} - {booking['weight']}kg\n"
                        f"🚢 {booking['service_type']}\n"
-                       f"📍 To: {booking['receiver_address']}\n\n"
+                       f"📍 To: {booking['destination']}\n"
+                       f"📍 Delivery: {booking['receiver_address']}\n\n"
                        f"We'll notify you at every step of your shipment's journey!\n"
                        f"🚢 GlobalLine Logistics")
                 
