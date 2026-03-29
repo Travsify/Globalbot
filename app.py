@@ -72,7 +72,7 @@ def init_db():
     c.execute("""
         CREATE TABLE IF NOT EXISTS conversations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            phone TEXT NOT NULL,
+            phone TEXT NOT NULL UNIQUE,
             name TEXT,
             last_message TEXT,
             last_message_time TIMESTAMP,
