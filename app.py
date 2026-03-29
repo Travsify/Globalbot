@@ -452,14 +452,16 @@ def handle_quote_flow(phone, text):
     print(f"  phone: {phone}, text: {text}")
     
     conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row  # Set BEFORE queries
     c = conn.cursor()
+    
     # Ensure row exists
     c.execute("""
         INSERT INTO conversations (phone, quote_state) VALUES (?, 'none')
         ON CONFLICT(phone) DO NOTHING
     """, (phone,))
     conn.commit()
-    conn.row_factory = sqlite3.Row
+    
     c.execute("SELECT quote_state FROM conversations WHERE phone = ?", (phone,))
     row = c.fetchone()
     conn.close()
@@ -468,7 +470,12 @@ def handle_quote_flow(phone, text):
         print(f"  state: NO ROW")
         return None
     
-    state = row["quote_state"]
+    # Handle both tuple and Row types
+    if isinstance(row, sqlite3.Row):
+        state = row["quote_state"]
+    else:
+        state = row[0]  # tuple index
+    
     print(f"  state: {state}")
     
     if state == "none":
