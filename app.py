@@ -170,6 +170,59 @@ def send_whatsapp_message(to, text):
         print(f"Error sending message: {e}")
         return {"error": str(e)}
 
+MAIN_MENU = """🏢 GlobalLine Logistics
+
+Welcome! How can we help you today?
+
+1️⃣ 📦 Book a Shipment
+2️⃣ 💰 Get a Quote
+3️⃣ 📍 Track Shipment
+4️⃣ 📋 List Services
+5️⃣ 💬 Talk to Support
+
+Just reply with a number (1-5) or your question! 🚢"""
+
+def get_main_menu_response(text_lower, phone):
+    """Handle main menu navigation"""
+    if text_lower in ["1", "book", "book shipment", "shipping", "send"]:
+        return ("📦 Let's book a shipment!\n\n"
+                "Where are we shipping from and to?\n"
+                "E.g. 'Lagos to London' or 'I want to send a package'\n\n"
+                "Or type CANCEL to go back.")
+    
+    if text_lower in ["2", "quote", "price", "cost", "rate"]:
+        return start_quote_flow_from_menu(phone)
+    
+    if text_lower in ["3", "track", "tracking", "track shipment"]:
+        return ("📍 Send me your tracking number!\n\n"
+                "E.g. GL12345678 or TRK987654\n\n"
+                "Or type CANCEL to go back.")
+    
+    if text_lower in ["4", "services", "list services", "what services", "what do you offer"]:
+        return ("📋 Our Services:\n\n"
+                "✈️ Air Freight: 1-3 days\n"
+                "🚢 Ocean Freight: 15-45 days\n"
+                "🚛 Road Freight: 1-7 days\n"
+                "📦 Warehousing\n"
+                "🏠 UK Customs Clearance\n\n"
+                "Type 'quote' to get pricing! 💰")
+    
+    if text_lower in ["5", "support", "help", "talk to someone", "agent"]:
+        return ("💬 Our support team is here!\n\n"
+                "📧 Email: info@globalline.io\n"
+                "📱 WhatsApp: +44 7490 347577\n"
+                "🌐 globalline.io\n\n"
+                "Or describe your issue and I'll help! 😊")
+    
+    if text_lower in ["menu", "main menu", "start", "hello", "hi", "hey"]:
+        return MAIN_MENU
+    
+    return None
+
+def start_quote_flow_from_menu(phone):
+    # This sets the state AND returns the first question
+    return start_quote_flow(phone)
+
 def generate_ai_response(phone, user_message):
     """Generate AI response - checks automation first, then falls back to Groq"""
     
@@ -178,8 +231,14 @@ def generate_ai_response(phone, user_message):
     
     # Cancel commands
     if text_lower in ["cancel", "stop", "exit", "nevermind", "forget it"]:
-        if cancel_quote_flow(phone):
-            return cancel_quote_flow(phone)
+        result = cancel_quote_flow(phone)
+        if result:
+            return result
+    
+    # Check main menu / navigation first
+    menu_response = get_main_menu_response(text_lower, phone)
+    if menu_response:
+        return menu_response
     
     # Check if in quote flow
     quote_response = handle_quote_flow(phone, text)
