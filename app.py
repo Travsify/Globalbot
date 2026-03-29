@@ -557,13 +557,16 @@ def webhook_whapi():
     print(f"Message count: {len(messages)}")
     
     for message in messages:
+        print(f"\n--- RAW MESSAGE ---")
+        print(json.dumps(message, indent=2)[:300])
+        
         msg_id = message.get("id")
         from_me = message.get("from_me")
         phone = message.get("from")
         text = message.get("text", {}).get("body", "")
         name = message.get("contact", {}).get("name", "Customer")
         
-        print(f"\n--- MESSAGE ---")
+        print(f"\n--- PARSED ---")
         print(f"  msg_id: {msg_id}")
         print(f"  from_me: {from_me}")
         print(f"  phone: {phone}")
