@@ -538,8 +538,8 @@ def handle_quote_flow(phone, text):
         return response
     
     else:
-        print(f"  >>> quote complete, returning None")
-        return None
+        print(f"  >>> quote complete, returning menu")
+        return MAIN_MENU
 
 
 def cancel_quote_flow(phone):
@@ -549,7 +549,7 @@ def cancel_quote_flow(phone):
     c.execute("DELETE FROM quote_requests WHERE phone = ? AND status = 'pending'", (phone,))
     conn.commit()
     conn.close()
-    return "Got it! Quote request cancelled. Message me anytime to start a new request. 😊"
+    return MAIN_MENU
 
 # ==========================================
 # WEBHOOKS
