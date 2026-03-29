@@ -288,20 +288,14 @@ def generate_ai_response(phone, user_message):
     print(f"  phone: {phone}")
     print(f"  text: {text}")
     
-    # Cancel commands
+    # Cancel commands - always handled
     if text_lower in ["cancel", "stop", "exit", "nevermind", "forget it"]:
         print(f"  >>> PATH: cancel")
         result = cancel_quote_flow(phone)
         if result:
             return result
     
-    # Check main menu / navigation first
-    menu_response = get_main_menu_response(text_lower, phone)
-    if menu_response:
-        print(f"  >>> PATH: main_menu")
-        return menu_response
-    
-    # Check if in quote flow
+    # Check if in quote flow FIRST - before main menu
     quote_response = handle_quote_flow(phone, text)
     if quote_response:
         print(f"  >>> PATH: quote_flow")
@@ -317,6 +311,12 @@ def generate_ai_response(phone, user_message):
     quote_keywords = ["quote", "price", "cost", "rate", "how much", "shipping cost", "get a quote"]
     if any(kw in text_lower for kw in quote_keywords):
         return start_quote_flow(phone)
+    
+    # Check main menu / navigation LAST (only for explicit menu commands)
+    menu_response = get_main_menu_response(text_lower, phone)
+    if menu_response:
+        print(f"  >>> PATH: main_menu")
+        return menu_response
     
     # Check for booking
     if text_lower == "book" or "confirm booking" in text_lower:
